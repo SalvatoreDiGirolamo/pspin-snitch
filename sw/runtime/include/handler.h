@@ -261,10 +261,10 @@ static inline int spin_host_write(uint64_t host_addr, uint64_t user_data, spin_c
     uint32_t res, cmd_id;
     uint32_t base_addr = 0x1b205000;
     asm volatile(" sw      %3, 148(%2);  \
-                   sw      %4, 144(%2);  \
-                   sw      %5, 152(%2);  \
-                   sw      %7, 156(%2);  \
-                   sw      %6, 160(%2);  \
+                   sw      %4, 152(%2);  \
+                   sw      %5, 156(%2);  \
+                   sw      %7, 160(%2);  \
+                   sw      %6, 164(%2);  \
                    sw      %8, 144(%2);  \
                    lw      %0, 128(%2);  \
                    lw      %1, 132(%2);  \

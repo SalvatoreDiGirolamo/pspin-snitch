@@ -126,6 +126,8 @@ int make_ec()
         sim_state.ec.scratchpad_addr[i] = sim_state.scratchpad_addr[i];
         sim_state.ec.scratchpad_size[i] = sim_state.scratchpad_size[i];
     }
+
+    return SPIN_SUCCESS;
 }
 
 
@@ -233,7 +235,7 @@ int gdriver_init(int argc, char **argv, const char *hfile, const char *hh, const
 
     for (int i = 0; i < NUM_CLUSTERS; i++)
     {
-      sim_state.scratchpad_addr[i] = 0x10012400 + (i*4*1024*1024);
+        sim_state.scratchpad_addr[i] = 0x10012400 + (i*4*1024*1024);
         sim_state.scratchpad_size[i] = SCRATCHPAD_SIZE;
     }
 

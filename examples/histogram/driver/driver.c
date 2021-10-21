@@ -26,7 +26,7 @@ uint32_t fill_packet(uint32_t msg_idx, uint32_t pkt_idx, uint8_t *pkt_buff, uint
     hdr->ip_hdr.length = max_pkt_size;
 
     uint32_t payload_len = max_pkt_size - sizeof(pkt_hdr_t);
-    uint32_t *payload_ptr = pkt_buff + sizeof(pkt_hdr_t);
+    uint32_t *payload_ptr = (uint32_t*) (pkt_buff + sizeof(pkt_hdr_t));
 
     for (int i=0; i<payload_len/sizeof(uint32_t); i++)
     {

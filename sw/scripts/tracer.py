@@ -21,6 +21,8 @@ import argparse
 TRACE_IN_REGEX = r'(\d+)\s+(\d+)\s+(\d+)\s+(0x[0-9A-Fa-fz]+)\s+([^#;]*)(\s*#;\s*(.*))?'
 FNAME_IN_REGEX = r'........ [<].*[>][:]'
 
+OP_TYPES = ["None", "Reg", "IImmediate", "UImmediate", "JImmediate", "SImmediate", "SFImmediate", "PC", "CSR", "CSRImmmediate", "RegRd", "RegRs2"]
+REG_NAMES = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"]
 disasm_map = {}
 disasm_map_fun = {}
 durs_idx = {}
@@ -106,6 +108,40 @@ def get_dur_and_fnames(filename: str, exename: str):
 	ends[current_pc_line] = int(time_str) + 1000
 	return starts, ends, fnames
 
+def get_op_str(opnum, instr_extras):
+
+	op_type_selector = ["opa_select", "opb_select"]
+	op_value_selector = ["opa", "opb"]
+	op_rs_selector = ["rs1", "rs2"]
+
+	op_type = OP_TYPES[instr_extras[op_type_selector[opnum]]]
+	if (op_type == "None"): return False, ""
+
+	op_value = instr_extras[op_value_selector[opnum]]
+	op_reg = "NONE"
+
+	is_reg = True
+	if op_type == "Reg" : op_reg = REG_NAMES[instr_extras[op_rs_selector[opnum]]]
+	elif op_type == "RegRd" : op_reg = REG_NAMES[instr_extras["rd"]]
+	else: is_reg = False
+
+	res_str = op_type
+	if (is_reg) : res_str += ":" + op_reg
+	res_str += "(0x%lx)" % (op_value)
+
+	return True, res_str
+
+
+# def get_rd_str(instr_extras):
+# 	write_rd = instr_extras["write_rd"] == "1"
+
+# 	if (not write_rd) : return False, ""
+
+# 	rd_str = "
+# 	if (write_rd) :
+		
+
+
 def parse_file(filename: str, exename: str, json: bool):
 	f = open(filename, 'r')
 	cluster_core_id = filename.split("_")[2].split(".")[0]
@@ -125,6 +161,9 @@ def parse_file(filename: str, exename: str, json: bool):
 		stall = instr_extras["stall"]
 		is_load = instr_extras["is_load"]
 		retire_load = instr_extras["retire_load"]
+
+		print("")
+		print(instr_extras)
 		#key = insn.split("(")[1].split(")")[0]
 		key = pc_str
 		if starts[id] != None and ends[id] != None:
@@ -133,6 +172,9 @@ def parse_file(filename: str, exename: str, json: bool):
 			fname = disasm_map_fun[key]        
 			instr = disasm_map[key]
 			instr_short = instr.split(" ")[0]
+			has_opa, opa_str = get_op_str(0, instr_extras)
+			has_opb, opb_str = get_op_str(1, instr_extras)
+
 			if json:
 				print("{\"name\": \"" + instr_short + "\", \
 						\"cat\": \"" + instr_short + "\", \
@@ -148,7 +190,28 @@ def parse_file(filename: str, exename: str, json: bool):
 								  }\
 					   },")
 			else:
-				print(time_str + " " + cycle_str + " " + duration + " " + cluster_id + " " + core_id + " " + fname + " " + pc_str + " " + location + " " + instr_short + " \"" + instr + "\"")
+				instr_text = "%s %s %s %s %s %s %s %s %s \"%s\" " % (time_str, cycle_str, duration, cluster_id, core_id, fname, pc_str, location, instr_short, instr)
+
+				if has_opa:
+					instr_text += "OPA:" + opa_str + " "
+
+				if has_opb:
+					instr_text += "OPB:" + opb_str + " "
+
+				print(instr_text)
+
+				# print(	time_str 			+ " " + 
+				# 		cycle_str 			+ " " + 
+				# 		duration 			+ " " + 
+				# 		cluster_id 			+ " " + 
+				# 		core_id 			+ " " + 
+				# 		fname 				+ " " + 
+				# 		pc_str 				+ " " + 
+				# 		location 			+ " " + 
+				# 		instr_short 		+ " " + 
+				# 		"\"" + instr + "\"" + " " + 
+				# 		"OPA: " + opa_type + "(" + opa_value + ") " + 
+				# 		"OPB: " + opb_type + "(" + opb_value + ") ")
 		id += 1
 	f.close()
 	if json:

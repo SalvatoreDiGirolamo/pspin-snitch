@@ -49,7 +49,7 @@ module task_frontend #(
 
     typedef enum logic [1:0] {Init, Idle, Running, StallingFeedback} state_t;
     state_t state_d, state_q;
-    logic [DataAlign-1:0] offset_d, offset_q;
+    logic [DataAlign-1:0] align_offset;
 
     hpu_handler_task_t current_task_q, current_task_d;
 
@@ -125,7 +125,7 @@ module task_frontend #(
     // we disable commands if there are feedbacks to send
     assign disable_commands_o = feedback_buff_out_valid;
 
-    assign core_resp.data = rsp_data << {offset_q, 3'b000};
+    assign core_resp.data = rsp_data << {align_offset, 3'b000};
     assign core_resp.error = rsp_error;
     assign core_resp_o.q_ready = req_ready;
 
@@ -189,7 +189,7 @@ module task_frontend #(
         rsp_data = '0;
         handler_error_code = '0;
         handler_error = 1'b0;
-        offset_d = offset_q;
+        align_offset = '0;
         core_resp_valid = 1'b0;
         rsp_error = 1'b0;
         handler_terminated_o = 1'b0;
@@ -199,7 +199,7 @@ module task_frontend #(
         if (state_q == Running && core_req_i.q_valid) begin
             req_ready = 1'b1;
             core_resp_valid = 1'b1; /* this gets buffered and delayed upstream */
-            offset_d = core_req_i.q.addr[DataAlign-1:0];
+            align_offset = core_req_i.q.addr[DataAlign-1:0];
 
             case (core_req_i.q.addr[7:0]) 
 
@@ -292,12 +292,10 @@ module task_frontend #(
             state_q <= Init; 
             current_task_q <= '0; //how to initialize this?
             trigger_feedback_q <= 1'b0;
-            offset_q <= '0;
         end else begin
             state_q <= state_d;
             current_task_q <= current_task_d;
             trigger_feedback_q <= trigger_feedback_d;
-            offset_q <= offset_d;
         end
     end
     
