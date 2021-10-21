@@ -9,6 +9,8 @@ VERILATOR_COMPILER_WORKERS ?= 8
 BENDER ?= ../../utils/bender
 
 TRACE_DEPTH?=6
+NUM_VERILATOR_THREADS?=4
+
 
 VLT_FLAGS    += -Wno-BLKANDNBLK
 VLT_FLAGS    += -Wno-LITENDIAN
@@ -20,7 +22,7 @@ VLT_FLAGS    += -Wno-UNSIGNED
 VLT_FLAGS    += -Wno-UNOPTFLAT
 VLT_FLAGS    += -Wno-NOLATCH
 VLT_FLAGS    += -Wno-fatal
-VLT_FLAGS    += --threads 4
+VLT_FLAGS    += --threads $(NUM_VERILATOR_THREADS)
 #VLT_FLAGS    += --prof-cfuncs
 
 VFLAGS_RELEASE=--Mdir obj_dir_release --sv $(VLT_FLAGS) -j $(VERILATOR_COMPILER_WORKERS) +systemverilogext+sv -Wno-lint -CFLAGS "-fPIC"
