@@ -1,4 +1,5 @@
-# Copyright 2020 ETH Zurich
+
+# Copyright 2021 ETH Zurich
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,27 +18,165 @@ import sys
 import os
 import queue
 import argparse
+from functools import lru_cache
 
 TRACE_IN_REGEX = r'(\d+)\s+(\d+)\s+(\d+)\s+(0x[0-9A-Fa-fz]+)\s+([^#;]*)(\s*#;\s*(.*))?'
 FNAME_IN_REGEX = r'........ [<].*[>][:]'
-
 OP_TYPES = ["None", "Reg", "IImmediate", "UImmediate", "JImmediate", "SImmediate", "SFImmediate", "PC", "CSR", "CSRImmmediate", "RegRd", "RegRs2"]
 REG_NAMES = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"]
 disasm_map = {}
 disasm_map_fun = {}
-durs_idx = {}
+map_fun_id= {}
+pending_loads = []
+acc_rd_index = {}
+debug_en = False
+json = False
+elf = ""
 
-def flush_buffer(buffer, exename):
-	# Pass all hex addresses to addr2line and read back the results.
-	cmd = 'addr2line -e ' + exename
-	for s in buffer:
-		cmd += ' ' + s
-	p = os.popen(cmd)
-	lines = p.readlines()
-	ret = []
-	for line in lines: 
-		ret += [line.split("/")[-1].replace("\n", "").replace("(discriminator 1)", "").rstrip()]
-	return ret
+@lru_cache(maxsize=1024)
+def addr2line_cache(addr):
+    cmd = f'addr2line -e {elf} -f -a -i {addr}'
+    cmd_out = os.popen(cmd).read().split('\n')[2]
+    return cmd_out
+
+
+class CoreInstruction:
+    def __init__(self, traceline):
+        self.duration = -1
+        self.stall = True
+        self.traceline = None
+        self.rd_data = -1
+        self.src_line = ""
+        self.start_time = traceline.get_time()
+        self.start_cyc = traceline.get_cycle()
+
+    def setup(self, traceline):
+        self.traceline = traceline
+        self.rd_data = traceline.get_writeback()
+        self.src_line = addr2line_cache(traceline.get_pc())
+
+    def set_stall(self, stall): self.stall = stall
+    def is_stalled(self): return self.stall
+    def set_end_cyc(self, cyc): self.duration = cyc - self.start_cyc
+
+    def set_dest_rd(self, rd, data):
+        if (not self.traceline.uses_rd() or not self.traceline.get_rd() == rd):
+            print("Error: trying to set RD(0x%x) on this instruction:" % (rd))
+            print(self.traceline.line_raw)
+            assert False
+        self.rd_data = data
+
+    def get_op_str(self, opnum):
+        op_type_selector = ["opa_select", "opb_select"]
+        op_value_selector = ["opa", "opb"]
+        op_rs_selector = ["rs1", "rs2"]
+
+        op_type = OP_TYPES[self.traceline.instr_extras[op_type_selector[opnum]]]
+        if (op_type == "None"): return False, ""
+
+        op_value = self.traceline.instr_extras[op_value_selector[opnum]]
+        op_reg = "NONE"
+
+        is_reg = True
+        if op_type == "Reg" : op_reg = REG_NAMES[self.traceline.instr_extras[op_rs_selector[opnum]]]
+        elif op_type == "RegRd" : op_reg = REG_NAMES[self.traceline.instr_extras["rd"]]
+        else: is_reg = False
+
+        res_str = op_type
+        if (is_reg) : res_str += ":" + op_reg
+        res_str += "(0x%lx)" % (op_value)
+
+        return True, res_str
+
+    def print(self, json=False): self.print_json() if json else self.print_txt()
+
+    def get_suffix(self):
+        suffix = ""
+        has_op_a, op_a_str = self.get_op_str(0)
+        if (has_op_a): suffix += " " + op_a_str
+
+        has_op_b, op_b_str = self.get_op_str(1)
+        if (has_op_b): suffix += " " + op_b_str
+
+        if (self.traceline.uses_rd()):
+            rd_name = REG_NAMES[self.traceline.get_rd()]
+            suffix += " RD:%s(0x%lx)" % (rd_name, self.rd_data)
+
+        if (self.traceline.is_load() or self.traceline.is_store()):
+            alu_result = self.traceline.get_alu_result()
+            suffix += " VA:0x%lx" % (alu_result)
+
+        return suffix
+
+    def print_txt(self):
+        fname = disasm_map_fun[self.traceline.get_pc()]        
+        instr = disasm_map[self.traceline.get_pc()]
+        instr_txt = "%i %i %i %i %i %s %s %s %s " % (\
+                        self.start_time, \
+                        self.start_cyc, \
+                        self.duration, \
+                        self.traceline.cluster_id, \
+                        self.traceline.core_id, \
+                        self.traceline.get_pc(), \
+                        self.src_line, \
+                        fname, \
+                        instr)
+        instr_txt += self.get_suffix()
+        print(instr_txt)
+
+    def print_json(self):
+        fname = disasm_map_fun[self.traceline.get_pc()]        
+        #pid = "core_%i_%i" % (self.traceline.cluster_id, self.traceline.core_id)
+        pid = self.traceline.trace_id
+        tid = map_fun_id[fname]
+        json_template = "{\"name\": \"%s\", \"cat\": \"%s\", \"ph\": \"X\", \"ts\": %i, \"dur\": %i, \"pid\": %s, \"tid\": %s, \"args\": {%s}},"
+        instr = disasm_map[self.traceline.get_pc()]
+        instr_short = instr.split(" ")[0]
+        full_instr = instr + self.get_suffix()
+        args = "\"pc\": \"%s\", \"instr\": \"%s\", \"cycle\": \"%i\", \"origin\": \"%s\"" % (self.traceline.get_pc(), full_instr, self.start_cyc, self.src_line)
+        json_txt = json_template % (instr_short, instr_short, self.start_time, self.duration * 1000, pid, tid, args)
+        print(json_txt)
+
+
+class TraceLine:
+    def __init__(self, trace_id, cluster_id, core_id, line: str):
+        match = re.search(TRACE_IN_REGEX, line.strip('\n'))
+        if match is None:
+            raise ValueError('Not a valid trace line:\n{}'.format(line))
+        self.time_str, self.cycle_str, self.priv_lvl, self.pc_str, self.insn, _, extras_str = match.groups()        
+        self.instr_extras = parse_annotation(extras_str)
+        self.cluster_id = int(cluster_id)
+        self.core_id = int(core_id)
+        self.line_raw = line
+        self.trace_id = trace_id
+
+    def is_stall(self): return int(self.instr_extras["stall"])
+    def is_load(self): return int(self.instr_extras["is_load"])
+    def is_store(self): return int(self.instr_extras["is_store"])
+    def is_load_retire(self): return int(self.instr_extras["retire_load"])
+    def is_acc(self): return int(self.instr_extras["acc_qvalid"])
+    def acc_uses_rd(self): return int(self.instr_extras["acc_uses_rd"])
+    def is_acc_retire(self): return int(self.instr_extras["retire_acc"])
+    def get_source(self): return int(self.instr_extras["source"])
+    def get_time(self): return int(self.time_str)
+    def get_pc(self): return self.pc_str
+    def get_next_pc(self): return self.instr_extras["pc_d"]
+    def get_cycle(self): return int(self.cycle_str)
+    def is_acc_async(self): return self.is_acc() and self.acc_uses_rd()
+    def uses_rd(self): return int(self.instr_extras["uses_rd"])
+    def get_rd(self): return int(self.instr_extras["rd"])
+    def get_lsu_rd(self): return int(self.instr_extras["lsu_rd"])
+    def get_ld_result_32(self): return int(self.instr_extras["ld_result_32"])
+    def get_writeback(self): return int(self.instr_extras["writeback"])
+    def get_alu_result(self): return int(self.instr_extras["alu_result"])
+    def get_acc_pid(self): return int(self.instr_extras["acc_pid"])
+    def get_acc_pdata_32(self): return int(self.instr_extras["acc_pdata_32"])
+    def is_core_instr(self): return  self.get_source() == 0
+    def is_valid_core_instr(self): return self.insn.strip() != "DASM(00000000)"
+
+    def print(self):
+        print(self.line_raw)
+
 
 def parse_annotation(dict_str: str):
 	return {
@@ -45,204 +184,149 @@ def parse_annotation(dict_str: str):
 		for key, val in re.findall(r"'([^']+)'\s*:\s*([^\s,]+)", dict_str)
 	}
 
-def get_dur_and_fnames(filename: str, exename: str):
-	f = open(filename, 'r')
-	lines = f.readlines()
-	prev = 0
-	durs = []
-	fnames = []
-	pc_strs = []
-	pending_loads = queue.Queue()
-	index = 0
-	starts = [None] * len(lines) # When istruction at line i starts
-	ends = [None] * len(lines) # When istruction at line i ends
-	current_pc = ""
-	current_pc_line = 0
-	ic_wait = False
-	new_instr = True
-	for line in lines: 
-		match = re.search(TRACE_IN_REGEX, line.strip('\n'))
-		if match is None:
-			raise ValueError('Not a valid trace line:\n{}'.format(line))
-		time_str, cycle_str, priv_lvl, pc_str, insn, _, extras_str = match.groups()
-		
-		ends[current_pc_line] = int(time_str)
+def dprint(str):
+    if (debug_en): print(str)
 
-		if pc_str != current_pc:
-			starts[index] = int(time_str)
-			current_pc = pc_str
-			current_pc_line = index
-			new_instr = True
-		else:
-			new_instr = False
+def record_instr(instr):
+    instr.print(json)
 
-		instr_extras = parse_annotation(extras_str)
-		stall = instr_extras["stall"]
-		is_load = instr_extras["is_load"]
-		retire_load = instr_extras["retire_load"]
-		rd = instr_extras["rd"]
-		lsu_rd = instr_extras["lsu_rd"]
-		if is_load == 1 and (new_instr or ic_wait):
-			pending_loads.put((index, rd))
-			#print("Pushing load " + str(index) + " " + str(rd))
-		if retire_load == 1 and lsu_rd != 0:
-			old_idx, old_rd = pending_loads.get()
-			#print("Popping load " + str(old_idx) + " " + str(old_rd))
-			ends[old_idx] = int(time_str)
-			if lsu_rd != old_rd:
-				print("idx " + str(index) + " rd mismatch " + str(lsu_rd) + " vs. " + str(old_rd))
-				exit(-1)
-		pc_strs += [pc_str]
-		index += 1
-		prev = int(time_str)        
-		if "00000000" in insn:
-			ic_wait = True
-		else:
-			ic_wait = False
+def parse_file(trace_id: int, filename: str, exename: str, json: bool):
+    f = open(filename, 'r')
+    cluster_core_id = filename.split("_")[2].split(".")[0]
+    core_id = str(int(cluster_core_id[len(cluster_core_id) - 4: len(cluster_core_id)], 16))
+    cluster_id = str(int(cluster_core_id[0:len(cluster_core_id) - 4], 16))
+    lines = f.readlines()
+    trace_name = os.path.basename(filename)
 
-		if(len(pc_strs) == 2000):
-			fnames += flush_buffer(pc_strs, exename)
-			pc_strs = []        
-	fnames += flush_buffer(pc_strs, exename)
-	f.close()
-	ends[current_pc_line] = int(time_str) + 1000
-	return starts, ends, fnames
+    current_instr = None
+    for line in lines: 
+        dprint("\nNew line:")
+        dprint(line.strip())
 
-def get_op_str(opnum, instr_extras):
+        trace_line = TraceLine(trace_id, cluster_id, core_id, line)
+    
+        if (trace_line.is_core_instr()):
 
-	op_type_selector = ["opa_select", "opb_select"]
-	op_value_selector = ["opa", "opb"]
-	op_rs_selector = ["rs1", "rs2"]
+            # if there is a current instruction that is not stalled and not offloaded (lsu or acc), then at this line we can compute its duration.
+            # If it's stalled, then we keep going and wait until it's not stalled anymore
+            # If its offloaded (lsu or async) then the termination cannot be determined here but it will be signaled by the offloaded unit
+            if (current_instr != None and not current_instr.is_stalled() and not (current_instr.traceline.is_load() or current_instr.traceline.is_acc_async())):
+                current_instr.set_end_cyc(trace_line.get_cycle())
+                record_instr(current_instr)
+                current_instr = None
 
-	op_type = OP_TYPES[instr_extras[op_type_selector[opnum]]]
-	if (op_type == "None"): return False, ""
+            # The core sees a new instruction as soon as the PC changes its value
+            # However, at this point the trace might not be valid if the instruction is stalling (e.g., acc_qvalid <- valid_instr)
+            # So, we mark the instruction as started here, but we actually initialize it as soon as we see it unstalled
+            if (current_instr == None or (current_instr.traceline != None and current_instr.traceline.get_pc() != trace_line.get_pc())):
+                dprint("new instr!")                
+                instr = CoreInstruction(trace_line)               
+                current_instr = instr
 
-	op_value = instr_extras[op_value_selector[opnum]]
-	op_reg = "NONE"
-
-	is_reg = True
-	if op_type == "Reg" : op_reg = REG_NAMES[instr_extras[op_rs_selector[opnum]]]
-	elif op_type == "RegRd" : op_reg = REG_NAMES[instr_extras["rd"]]
-	else: is_reg = False
-
-	res_str = op_type
-	if (is_reg) : res_str += ":" + op_reg
-	res_str += "(0x%lx)" % (op_value)
-
-	return True, res_str
+            # we are sure that there is a current_instr at this point.
+            if (not trace_line.is_stall()):
+                dprint("setup instr!")
+                is_acc = trace_line.is_acc_async() # this means that the instruction is offloaded to an acc AND we want a response in RD from that
+                is_load = trace_line.is_load() # also loads are async
+                current_instr.setup(trace_line)
+                current_instr.set_stall(False)
+                if is_load:
+                    # we assume loads are completed in order (FIFO)
+                    dprint("new load!")
+                    pending_loads.append(instr)
+                elif is_acc:
+                    dprint("new acc (rd: 0x%x)" % instr.traceline.get_rd())
+                    # we don't make any assumption on acc instructions. Just index them by RD (could do the same for loads actually)
+                    assert not instr.traceline.get_rd() in acc_rd_index
+                    acc_rd_index[instr.traceline.get_rd()] = instr
 
 
-# def get_rd_str(instr_extras):
-# 	write_rd = instr_extras["write_rd"] == "1"
+            # handle retiring of loads
+            if (trace_line.is_load_retire()):
+                assert pending_loads
+                load_instr = pending_loads.pop(0)
+                dprint("load completed (pending loads: %i)!" % (len(pending_loads)))
 
-# 	if (not write_rd) : return False, ""
+                # update the RD value (i.e., the value that has been read)
+                load_instr.set_dest_rd(trace_line.get_lsu_rd(), trace_line.get_ld_result_32())
 
-# 	rd_str = "
-# 	if (write_rd) :
-		
+                # not the load completed, let's print it
+                load_instr.set_end_cyc(trace_line.get_cycle())
+                record_instr(load_instr)
 
+            # handle retiring of acc instrs
+            if (trace_line.is_acc_retire()):
+                dprint("acc completed (rd: 0x%x)" % (trace_line.get_acc_pid()))
+                acc_instr = acc_rd_index[trace_line.get_acc_pid()]
 
-def parse_file(filename: str, exename: str, json: bool):
-	f = open(filename, 'r')
-	cluster_core_id = filename.split("_")[2].split(".")[0]
-	core_id = str(int(cluster_core_id[len(cluster_core_id) - 4: len(cluster_core_id)], 16))
-	cluster_id = str(int(cluster_core_id[0:len(cluster_core_id) - 4], 16))
-	starts, ends, fnames = get_dur_and_fnames(filename, exename)
-	lines = f.readlines()
-	id = 0
-	if json:
-		print("{\"traceEvents\": [")
-	for line in lines: 
-		match = re.search(TRACE_IN_REGEX, line.strip('\n'))
-		if match is None:
-			raise ValueError('Not a valid trace line:\n{}'.format(line))
-		time_str, cycle_str, priv_lvl, pc_str, insn, _, extras_str = match.groups()
-		instr_extras = parse_annotation(extras_str)
-		stall = instr_extras["stall"]
-		is_load = instr_extras["is_load"]
-		retire_load = instr_extras["retire_load"]
+                # update the RD value (i.e., the value that has been written back by the acc)
+                acc_instr.set_dest_rd(trace_line.get_acc_pid(), trace_line.get_acc_pdata_32())
 
-		print("")
-		print(instr_extras)
-		#key = insn.split("(")[1].split(")")[0]
-		key = pc_str
-		if starts[id] != None and ends[id] != None:
-			duration = str(ends[id] - starts[id])        
-			location = fnames[id]
-			fname = disasm_map_fun[key]        
-			instr = disasm_map[key]
-			instr_short = instr.split(" ")[0]
-			has_opa, opa_str = get_op_str(0, instr_extras)
-			has_opb, opb_str = get_op_str(1, instr_extras)
+                # not the acc instruction completed, let's print it
+                acc_instr.set_end_cyc(trace_line.get_cycle())
+                record_instr(acc_instr)
 
-			if json:
-				print("{\"name\": \"" + instr_short + "\", \
-						\"cat\": \"" + instr_short + "\", \
-						\"ph\": \"X\", \
-						\"ts\": " + time_str + ", \
-						\"dur\": " + duration + ", \
-						\"pid\": \"./trace_core_" + cluster_id + "_" + core_id + ".log\", \
-						\"tid\": \"" + fname + "\", \
-						\"args\":{\"pc\": \"" + pc_str + "\", \
-								  \"instr\": \"" + instr + "\", \
-								  \"time\": \"" + cycle_str + "\", \
-								  \"Origin\": \" " + location + " \" \
-								  }\
-					   },")
-			else:
-				instr_text = "%s %s %s %s %s %s %s %s %s \"%s\" " % (time_str, cycle_str, duration, cluster_id, core_id, fname, pc_str, location, instr_short, instr)
-
-				if has_opa:
-					instr_text += "OPA:" + opa_str + " "
-
-				if has_opb:
-					instr_text += "OPB:" + opb_str + " "
-
-				print(instr_text)
-
-				# print(	time_str 			+ " " + 
-				# 		cycle_str 			+ " " + 
-				# 		duration 			+ " " + 
-				# 		cluster_id 			+ " " + 
-				# 		core_id 			+ " " + 
-				# 		fname 				+ " " + 
-				# 		pc_str 				+ " " + 
-				# 		location 			+ " " + 
-				# 		instr_short 		+ " " + 
-				# 		"\"" + instr + "\"" + " " + 
-				# 		"OPA: " + opa_type + "(" + opa_value + ") " + 
-				# 		"OPB: " + opb_type + "(" + opb_value + ") ")
-		id += 1
-	f.close()
-	if json:
-		print ("{}]}")
+                # free RD reservation
+                del acc_rd_index[trace_line.get_acc_pid()]
+                
 
 def load_disasm(filename : str):
-	f = open(filename, 'r')
-	lines = f.readlines()
-	last_fun = ""
-	for line in lines: 
-		match_fname = re.search(FNAME_IN_REGEX, line.strip('\n'))
-		if match_fname is not None:
-			last_fun = match_fname.group(0).split(" ")[1].split("<")[1].split(">")[0]
-		if len(line) > 8 and line[8] == ":":            
-			clean = ' '.join(line.split())
-			fields = clean.split(' ', 2)
-			disasm_map["0x"+fields[0].split(':')[0]] = fields[2]
-			disasm_map_fun["0x"+fields[0].split(':')[0]] = last_fun
-	f.close()
+    f = open(filename, 'r')
+    lines = f.readlines()
+    last_fun = ""
+    fun_id =0 
+    for line in lines:
+        match_fname = re.search(FNAME_IN_REGEX, line.strip('\n'))
+        if match_fname is not None:
+            last_fun = match_fname.group(0).split(" ")[1].split("<")[1].split(">")[0]
+            if (last_fun not in map_fun_id):
+                map_fun_id[last_fun] = fun_id
+                fun_id += 1
+
+        if len(line) > 8 and line[8] == ":":            
+            clean = ' '.join(line.split())
+            fields = clean.split(' ', 2)
+            disasm_map["0x"+fields[0].split(':')[0]] = fields[2]
+            disasm_map_fun["0x"+fields[0].split(':')[0]] = last_fun
+    f.close()
 
 def main():
-	parser = argparse.ArgumentParser(description='Converts the Snitch traces into .txt traces or .json traces (that can be visualized in Google chrome).', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-	# Mandatory arguments
-	parser.add_argument('-t', '--trace', help='The trace to convert.', required=True)
-	parser.add_argument('-d', '--disasm', help='The disasm.', required=True)
-	parser.add_argument('-e', '--exe', help='The executable.', required=True)
-	parser.add_argument('-x', '--text', help='Converts to .txt. If not specified, it converts to .json.', required=False, action='store_true')
-	args = parser.parse_args()
-	json = not args.text
-	load_disasm(args.disasm)
-	parse_file(args.trace, args.exe, json)
+    global elf, json, debug_en
+    parser = argparse.ArgumentParser(description='Converts the Snitch traces into .txt traces or .json traces (that can be visualized in Google chrome).', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    # Mandatory arguments
+    parser.add_argument('-d', '--disasm', help='The disasm.', required=True)
+    parser.add_argument('-e', '--exe', help='The executable.', required=True)
+    parser.add_argument('-x', '--text', help='Converts to .txt. If not specified, it converts to .json.', required=False, action='store_true')
+    parser.add_argument('-b', '--debug', help='Enable debug', required=False, action='store_true')
+    parser.add_argument('traces', nargs='*')
+
+    args = parser.parse_args()
+    json = not args.text
+    elf = args.exe
+    traces = args.traces
+    load_disasm(args.disasm)
+    debug_en = args.debug
+    trace_id = 0
+
+    # core: {"pid":59843,"tid":59843,"ts":0,"ph":"M","cat":"__metadata","name":"process_name","args":{"name":"core_0_0"}},
+    # fun {"pid":59843,"tid":59843,"ts":0,"ph":"M","cat":"__metadata","name":"thread_name","args":{"name":"foo"}},
+    json_core_metadata_template = "{\"pid\":%i,\"tid\":0,\"ts\":0,\"ph\":\"M\",\"cat\":\"__metadata\",\"name\":\"process_name\",\"args\":{\"name\":\"%s\"}},"
+    json_fun_metadata_template = "{\"pid\":%i,\"tid\":%i,\"ts\":0,\"ph\":\"M\",\"cat\":\"__metadata\",\"name\":\"thread_name\",\"args\":{\"name\":\"%s\"}},"
+
+    if (json): # prolog and metadata
+        print('{"traceEvents": [')
+
+    for trace in traces:
+        if (json):
+            print(json_core_metadata_template % (trace_id, os.path.basename(trace)))
+
+            for fun in map_fun_id.items():
+                print(json_fun_metadata_template % (trace_id, fun[1], fun[0]))
+
+        parse_file(trace_id, trace, args.exe, json)
+        trace_id += 1
+
+    if (json): print("{}]}\n") # epilog
 
 if __name__== "__main__":
 	main()

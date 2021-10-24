@@ -7,10 +7,10 @@ all::
 	gengetopt -i ../generic_driver/gdriver_args.ggo -F gdriver_args --output-dir=../generic_driver/
 
 driver: driver/driver.c ../generic_driver/gdriver_args.c ../generic_driver/gdriver.c
-	 gcc -pg -std=c99 -I../generic_driver/ -I$(PSPIN_RT)/runtime/include/ -I$(PSPIN_HW)/verilator_model/include driver/driver.c ../generic_driver/gdriver.c ../generic_driver/gdriver_args.c -L$(PSPIN_HW)/verilator_model/lib/ -lpspin -o sim_${SPIN_APP_NAME}
+	 gcc -pg -std=c99 -I../generic_driver/ -I$(PSPIN_RT)/runtime/include/ -I$(PSPIN_HW)/verilator_model/include driver/driver.c ../generic_driver/gdriver.c ../generic_driver/gdriver_args.c -L$(PSPIN_HW)/verilator_model/lib/ -lpspin -o sim_${SPIN_APP_NAME} -lpthread
 
 driver_debug: driver/driver.c ../generic_driver/gdriver_args.c
-	 gcc -g -std=c99 -I../generic_driver/ -I$(PSPIN_RT)/runtime/include/ -I$(PSPIN_HW)/verilator_model/include driver/driver.c ../generic_driver/gdriver.c ../generic_driver/gdriver_args.c -L$(PSPIN_HW)/verilator_model/lib/ -lpspin_debug -o sim_${SPIN_APP_NAME}_debug
+	 gcc -g -std=c99 -I../generic_driver/ -I$(PSPIN_RT)/runtime/include/ -I$(PSPIN_HW)/verilator_model/include driver/driver.c ../generic_driver/gdriver.c ../generic_driver/gdriver_args.c -L$(PSPIN_HW)/verilator_model/lib/ -lpspin_debug -o sim_${SPIN_APP_NAME}_debug -lpthread
 
 clean::
 	-@rm *.log 2>/dev/null || true
