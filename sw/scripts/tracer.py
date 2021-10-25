@@ -115,7 +115,7 @@ class CoreInstruction:
         fname = disasm_map_fun[self.traceline.get_pc()]        
         instr = disasm_map[self.traceline.get_pc()]
         instr_short = instr.split(" ")[0]
-        instr_txt = "%i %i %i %i %i %s %s %s %s %s \"" % (\
+        instr_txt = "%i %i %i %02i %i %s %s %s %s %s \"" % (\
                         self.start_time, \
                         self.start_cyc, \
                         self.duration, \
