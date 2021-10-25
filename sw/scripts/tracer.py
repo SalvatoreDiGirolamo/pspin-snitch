@@ -41,14 +41,14 @@ def addr2line_cache(addr):
 
 
 class CoreInstruction:
-    def __init__(self, traceline):
+    def __init__(self, cyc, time):
         self.duration = -1
         self.stall = True
         self.traceline = None
         self.rd_data = -1
         self.src_line = ""
-        self.start_time = traceline.get_time()
-        self.start_cyc = traceline.get_cycle()
+        self.start_time = time
+        self.start_cyc = cyc
 
     def setup(self, traceline):
         self.traceline = traceline
@@ -57,7 +57,9 @@ class CoreInstruction:
 
     def set_stall(self, stall): self.stall = stall
     def is_stalled(self): return self.stall
-    def set_end_cyc(self, cyc): self.duration = cyc - self.start_cyc
+    def set_end_cyc(self, cyc): 
+        #print("start_cyc: %i end_cyc: %i" %(self.start_cyc, cyc))
+        self.duration = cyc - self.start_cyc
 
     def set_dest_rd(self, rd, data):
         if (not self.traceline.uses_rd() or not self.traceline.get_rd() == rd):
@@ -160,7 +162,7 @@ class TraceLine:
     def get_source(self): return int(self.instr_extras["source"])
     def get_time(self): return int(self.time_str)
     def get_pc(self): return self.pc_str
-    def get_next_pc(self): return self.instr_extras["pc_d"]
+    def get_next_pc(self): return ("0x%x" % (self.instr_extras["pc_d"]))
     def get_cycle(self): return int(self.cycle_str)
     def is_acc_async(self): return self.is_acc() and self.acc_uses_rd()
     def uses_rd(self): return int(self.instr_extras["uses_rd"])
@@ -207,41 +209,8 @@ def parse_file(trace_id: int, filename: str, exename: str, json: bool):
     
         if (trace_line.is_core_instr()):
 
-            # if there is a current instruction that is not stalled and not offloaded (lsu or acc), then at this line we can compute its duration.
-            # If it's stalled, then we keep going and wait until it's not stalled anymore
-            # If its offloaded (lsu or async) then the termination cannot be determined here but it will be signaled by the offloaded unit
-            if (current_instr != None and not current_instr.is_stalled() and not (current_instr.traceline.is_load() or current_instr.traceline.is_acc_async())):
-                current_instr.set_end_cyc(trace_line.get_cycle())
-                record_instr(current_instr)
-                current_instr = None
-
-            # The core sees a new instruction as soon as the PC changes its value
-            # However, at this point the trace might not be valid if the instruction is stalling (e.g., acc_qvalid <- valid_instr)
-            # So, we mark the instruction as started here, but we actually initialize it as soon as we see it unstalled
-            if (current_instr == None or (current_instr.traceline != None and current_instr.traceline.get_pc() != trace_line.get_pc())):
-                dprint("new instr!")                
-                instr = CoreInstruction(trace_line)               
-                current_instr = instr
-
-            # we are sure that there is a current_instr at this point.
-            if (not trace_line.is_stall()):
-                dprint("setup instr!")
-                is_acc = trace_line.is_acc_async() # this means that the instruction is offloaded to an acc AND we want a response in RD from that
-                is_load = trace_line.is_load() # also loads are async
-                current_instr.setup(trace_line)
-                current_instr.set_stall(False)
-                if is_load:
-                    # we assume loads are completed in order (FIFO)
-                    dprint("new load!")
-                    pending_loads.append(instr)
-                elif is_acc:
-                    dprint("new acc (rd: 0x%x)" % instr.traceline.get_rd())
-                    # we don't make any assumption on acc instructions. Just index them by RD (could do the same for loads actually)
-                    assert not instr.traceline.get_rd() in acc_rd_index
-                    acc_rd_index[instr.traceline.get_rd()] = instr
-
-
             # handle retiring of loads
+            # We assume that an offloaded instruction cannot be retired in the same cycle it is issued
             if (trace_line.is_load_retire()):
                 assert pending_loads
                 load_instr = pending_loads.pop(0)
@@ -268,6 +237,51 @@ def parse_file(trace_id: int, filename: str, exename: str, json: bool):
 
                 # free RD reservation
                 del acc_rd_index[trace_line.get_acc_pid()]
+
+
+            # if pc_q != pc_d --> a new instruction starts at the next cycle
+            pc_change = trace_line.get_pc() != trace_line.get_next_pc()
+
+            if (current_instr == None): 
+                new_instr_start_cyc = trace_line.get_cycle()
+                new_instr_start_time = trace_line.get_time()
+                instr = CoreInstruction(new_instr_start_cyc, new_instr_start_time)
+                current_instr = instr
+
+            # As soon as the instruction is not stalled, the traceline is valid and we can "initialize" the instruction
+            # we are sure that there is a current_instr at this point.
+            if (not trace_line.is_stall()):
+                dprint("setup instr!")
+                is_acc = trace_line.is_acc_async() # this means that the instruction is offloaded to an acc AND we want a response in RD from that
+                is_load = trace_line.is_load() # also loads are async
+                current_instr.setup(trace_line)
+                current_instr.set_stall(False)
+                if is_load:
+                    # we assume loads are completed in order (FIFO)
+                    dprint("new load!")
+                    pending_loads.append(instr)
+                elif is_acc:
+                    dprint("new acc (rd: 0x%x)" % instr.traceline.get_rd())
+                    # we don't make any assumption on acc instructions. Just index them by RD (could do the same for loads actually)
+                    assert not instr.traceline.get_rd() in acc_rd_index
+                    acc_rd_index[instr.traceline.get_rd()] = instr
+
+                # if there is a current instruction that is not stalled and not offloaded (lsu or acc), then at this line we can compute its duration.
+                # If it's stalled, then we keep going and wait until it's not stalled anymore
+                # If its offloaded (lsu or async) then the termination cannot be determined here but it will be signaled by the offloaded unit
+                if (pc_change and not (current_instr.traceline.is_load() or current_instr.traceline.is_acc_async())):
+                    end_cycle = trace_line.get_cycle() + 1
+                    current_instr.set_end_cyc(end_cycle)
+                    record_instr(current_instr)
+                    current_instr = None
+
+            # if the PC changes in the next cycle, then move to the next instruction
+            if (pc_change):
+                dprint("new instr starts (PC: %s -> %s)" % (trace_line.get_pc(), trace_line.get_next_pc()))
+                new_instr_start_cyc = trace_line.get_cycle() + 1
+                new_instr_start_time = trace_line.get_time() + 1000
+                instr = CoreInstruction(new_instr_start_cyc, new_instr_start_time)
+                current_instr = instr
                 
 
 def load_disasm(filename : str):
