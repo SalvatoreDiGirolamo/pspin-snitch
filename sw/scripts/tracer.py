@@ -36,7 +36,8 @@ elf = ""
 @lru_cache(maxsize=1024)
 def addr2line_cache(addr):
     cmd = f'addr2line -e {elf} -f -a -i {addr}'
-    cmd_out = os.popen(cmd).read().split('\n')[2]
+    cmd_out = os.path.basename(os.popen(cmd).read().split('\n')[2])
+    #print(os.popen(cmd).read().split('\n'))
     return cmd_out
 
 
@@ -113,17 +114,19 @@ class CoreInstruction:
     def print_txt(self):
         fname = disasm_map_fun[self.traceline.get_pc()]        
         instr = disasm_map[self.traceline.get_pc()]
-        instr_txt = "%i %i %i %i %i %s %s %s %s " % (\
+        instr_short = instr.split(" ")[0]
+        instr_txt = "%i %i %i %i %i %s %s %s %s %s \"" % (\
                         self.start_time, \
                         self.start_cyc, \
                         self.duration, \
                         self.traceline.cluster_id, \
                         self.traceline.core_id, \
+                        fname, \
                         self.traceline.get_pc(), \
                         self.src_line, \
-                        fname, \
+                        instr_short,
                         instr)
-        instr_txt += self.get_suffix()
+        instr_txt += self.get_suffix() + "\""
         print(instr_txt)
 
     def print_json(self):

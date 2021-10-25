@@ -29,14 +29,14 @@ deploy::
 	$(OBJDUMP) -S build/$(SPIN_APP_NAME) > build/$(SPIN_APP_NAME).disasm
 
 trace-chrome::
-	perl $(PSPIN_RT)/scripts/tracevis/parse.pl  build/$(SPIN_APP_NAME) $(TRACE_DIR)trace_core_* 
+	@python3 $(PSPIN_RT)/scripts/tracer.py -e build/$(SPIN_APP_NAME) -d build/$(SPIN_APP_NAME).disasm logs/trace_hart_* > $(SPIN_APP_NAME).trace.json
 
 trace::
-	perl $(PSPIN_RT)/scripts/tracevis/parse.pl -t build/$(SPIN_APP_NAME) $(TRACE_DIR)trace_core_* 
-
+	@python3 $(PSPIN_RT)/scripts/tracer.py -e build/$(SPIN_APP_NAME) -d build/$(SPIN_APP_NAME).disasm -x logs/trace_hart_* > $(SPIN_APP_NAME).trace.txt
+	
 info::
 	make trace;
-	$(PSPIN_RT)/scripts/handlers_data.sh $(INFO_KEY) $(SPIN_APP_NAME).trace.txt
+	$(PSPIN_RT)/scripts/handlers_info.sh $(INFO_KEY) $(SPIN_APP_NAME).trace.txt
 
 stats::
 	$(PSPIN_RT)/scripts/handlers_duration.sh transcript
